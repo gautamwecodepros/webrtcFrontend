@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import io from "socket.io-client";
 
 const socket = io("https://webrtcbackend-production-0dc3.up.railway.app", {
-  transports: ["websocket"],
+  transports: ["websocket", "polling"],
 });
 
 export default function App() {
@@ -30,8 +30,12 @@ export default function App() {
     });
 
     socket.on("connect", () => {
+      console.log("Connected:", socket.id);
       setMyId(socket.id);
-      console.log("Connected to signaling:", socket.id);
+    });
+
+    socket.on("connect_error", (err) => {
+      console.error("Socket connect error:", err);
     });
 
     pcRef.current.ontrack = (event) => {
@@ -85,11 +89,16 @@ export default function App() {
   }, []);
 
   async function initMic() {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
-    stream.getTracks().forEach((track) => {
-      pcRef.current.addTrack(track, stream);
-    });
+      stream.getTracks().forEach((track) => {
+        pcRef.current.addTrack(track, stream);
+      });
+    } catch (err) {
+      console.error("Mic error:", err);
+      alert("Microphone not found or permission denied");
+    }
   }
 
   async function callUser() {
