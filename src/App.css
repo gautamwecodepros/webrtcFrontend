@@ -143,3 +143,22 @@ button:active {
   border-radius: 10px;
   background: #334155;
 }
+
+.app {
+  text-align: center;
+  padding: 30px;
+  font-family: sans-serif;
+}
+
+.code-box {
+  background: #eee;
+  padding: 10px;
+  margin: 10px;
+  font-size: 24px;
+  display: inline-block;
+}
+
+input {
+  padding: 10px;
+  margin-top: 10px;
+}

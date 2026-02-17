@@ -7,15 +7,14 @@ const socket = io("https://webrtcbackend-production-0dc3.up.railway.app", {
 });
 
 export default function App() {
-  const [myId, setMyId] = useState("");
-  const [targetId, setTargetId] = useState("");
+  const [myCode, setMyCode] = useState("");
+  const [targetCode, setTargetCode] = useState("");
   const [incomingCall, setIncomingCall] = useState(null);
   const [inCall, setInCall] = useState(false);
-  const [micReady, setMicReady] = useState(false);
 
   const pcRef = useRef(null);
   const remoteAudioRef = useRef();
-  const localStreamRef = useRef();
+  const localStreamRef = useRef(null);
 
   useEffect(() => {
     pcRef.current = new RTCPeerConnection({
@@ -26,27 +25,20 @@ export default function App() {
           username: "openrelayproject",
           credential: "openrelayproject",
         },
-        {
-          urls: "turn:openrelay.metered.ca:443",
-          username: "openrelayproject",
-          credential: "openrelayproject",
-        },
       ],
     });
 
-    socket.on("connect", () => {
-      setMyId(socket.id);
-    });
+    socket.on("your-code", setMyCode);
 
-    pcRef.current.ontrack = (event) => {
-      remoteAudioRef.current.srcObject = event.streams[0];
+    pcRef.current.ontrack = (e) => {
+      remoteAudioRef.current.srcObject = e.streams[0];
     };
 
-    pcRef.current.onicecandidate = (event) => {
-      if (event.candidate && targetId) {
+    pcRef.current.onicecandidate = (e) => {
+      if (e.candidate) {
         socket.emit("ice-candidate", {
-          to: targetId,
-          candidate: event.candidate,
+          to: targetCode,
+          candidate: e.candidate,
         });
       }
     };
@@ -63,43 +55,37 @@ export default function App() {
     });
 
     socket.on("ice-candidate", async (candidate) => {
-      try {
-        await pcRef.current.addIceCandidate(new RTCIceCandidate(candidate));
-      } catch {}
+      await pcRef.current.addIceCandidate(new RTCIceCandidate(candidate));
     });
 
     socket.on("call-ended", endCall);
   }, []);
 
   async function initMic() {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      localStreamRef.current = stream;
+    if (localStreamRef.current) return;
 
-      stream.getTracks().forEach((track) => {
-        pcRef.current.addTrack(track, stream);
-      });
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    localStreamRef.current = stream;
 
-      setMicReady(true);
-    } catch {
-      alert("Mic permission required");
-    }
+    stream.getTracks().forEach((track) => {
+      pcRef.current.addTrack(track, stream);
+    });
   }
 
   async function startCall() {
-    if (!micReady) await initMic();
+    await initMic();
 
     const offer = await pcRef.current.createOffer();
     await pcRef.current.setLocalDescription(offer);
 
     socket.emit("call-user", {
-      to: targetId,
+      to: targetCode,
       offer,
     });
   }
 
   async function acceptCall() {
-    if (!micReady) await initMic();
+    await initMic();
 
     await pcRef.current.setRemoteDescription(
       new RTCSessionDescription(incomingCall.offer),
@@ -113,74 +99,52 @@ export default function App() {
       answer,
     });
 
-    setTargetId(incomingCall.from);
+    setTargetCode(incomingCall.from);
     setIncomingCall(null);
     setInCall(true);
   }
 
   function endCall() {
     pcRef.current.close();
-
-    pcRef.current = new RTCPeerConnection({
-      iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
-    });
-
-    if (localStreamRef.current) {
-      localStreamRef.current.getTracks().forEach((t) => t.stop());
-    }
-
     setInCall(false);
     setIncomingCall(null);
-    setMicReady(false);
 
-    socket.emit("call-ended", { to: targetId });
+    socket.emit("call-ended", { to: targetCode });
   }
 
   return (
-    <div className="app-container">
-      <div className="card">
-        <div className="title">Your ID</div>
-        <div className="user-id">{myId}</div>
+    <div className="app">
+      <h2>Your Call Code</h2>
 
-        {!inCall && !incomingCall && (
-          <>
-            <input
-              placeholder="Enter ID to call"
-              value={targetId}
-              onChange={(e) => setTargetId(e.target.value)}
-            />
-            <button className="call-btn" onClick={startCall}>
-              Call
-            </button>
-          </>
-        )}
-
-        {incomingCall && (
-          <>
-            <div className="calling">Incoming Call</div>
-            <button className="accept-btn" onClick={acceptCall}>
-              Accept
-            </button>
-            <button
-              className="reject-btn"
-              onClick={() => setIncomingCall(null)}
-            >
-              Reject
-            </button>
-          </>
-        )}
-
-        {inCall && (
-          <>
-            <div className="calling">In Call...</div>
-            <button className="hangup-btn" onClick={endCall}>
-              Hang Up
-            </button>
-          </>
-        )}
-
-        <audio ref={remoteAudioRef} autoPlay />
+      <div className="code-box">
+        {myCode}
+        <button onClick={() => navigator.clipboard.writeText(myCode)}>
+          Copy
+        </button>
       </div>
+
+      {!inCall && !incomingCall && (
+        <>
+          <input
+            placeholder="Enter code to call"
+            value={targetCode}
+            onChange={(e) => setTargetCode(e.target.value)}
+          />
+          <button onClick={startCall}>Call</button>
+        </>
+      )}
+
+      {incomingCall && (
+        <>
+          <p>Incoming Call from {incomingCall.from}</p>
+          <button onClick={acceptCall}>Accept</button>
+          <button onClick={() => setIncomingCall(null)}>Reject</button>
+        </>
+      )}
+
+      {inCall && <button onClick={endCall}>Hang Up</button>}
+
+      <audio ref={remoteAudioRef} autoPlay />
     </div>
   );
 }
