@@ -107,19 +107,34 @@ export default function App() {
   }
 
   async function initMedia() {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
-      });
-      localStreamRef.current = stream;
-      stream.getTracks().forEach(track => pcRef.current.addTrack(track, stream));
-      
-      // Permission is now granted, we can see device names!
-      await refreshDevices();
-    } catch (err) {
-      alert("Microphone access is required.");
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { 
+        echoCancellation: true, 
+        noiseSuppression: true, 
+        autoGainControl: true 
+      }
+    });
+    localStreamRef.current = stream;
+    stream.getTracks().forEach(track => pcRef.current.addTrack(track, stream));
+    
+    await refreshDevices();
+  } catch (err) {
+    console.error("Media Error:", err);
+    
+    // Specifically handling the overlay/permission error
+    if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+      alert("Permission Denied: Please close any floating bubbles (like Messenger) or screen overlays and try again.");
+    } else if (err.name === 'NotFoundError') {
+      alert("No microphone found on this device.");
+    } else {
+      alert("Could not access microphone. Please ensure no other app is using it.");
     }
+    
+    // Reset state so the user can try clicking 'Call' or 'Accept' again
+    cleanupCall(); 
   }
+}
 
   async function switchSpeaker(deviceId) {
     if (remoteAudioRef.current && remoteAudioRef.current.setSinkId) {
