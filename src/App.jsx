@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
 import io from "socket.io-client";
-import "./App.css";
 
 const socket = io("https://webrtcbackend-production-0dc3.up.railway.app", {
   transports: ["websocket", "polling"],
@@ -21,7 +20,10 @@ export default function App() {
       iceServers: [
         { urls: "stun:stun.l.google.com:19302" },
         {
-          urls: "turn:openrelay.metered.ca:80",
+          urls: [
+            "turn:openrelay.metered.ca:80",
+            "turn:openrelay.metered.ca:443?transport=tcp",
+          ],
           username: "openrelayproject",
           credential: "openrelayproject",
         },
@@ -30,8 +32,11 @@ export default function App() {
 
     socket.on("your-code", setMyCode);
 
-    pcRef.current.ontrack = (e) => {
+    pcRef.current.ontrack = async (e) => {
       remoteAudioRef.current.srcObject = e.streams[0];
+      try {
+        await remoteAudioRef.current.play();
+      } catch {}
     };
 
     pcRef.current.onicecandidate = (e) => {
@@ -106,6 +111,11 @@ export default function App() {
 
   function endCall() {
     pcRef.current.close();
+
+    if (localStreamRef.current) {
+      localStreamRef.current.getTracks().forEach((t) => t.stop());
+    }
+
     setInCall(false);
     setIncomingCall(null);
 
@@ -113,30 +123,25 @@ export default function App() {
   }
 
   return (
-    <div className="app">
+    <div style={{ textAlign: "center", padding: 30 }}>
       <h2>Your Call Code</h2>
-
-      <div className="code-box">
-        {myCode}
-        <button onClick={() => navigator.clipboard.writeText(myCode)}>
-          Copy
-        </button>
-      </div>
+      <h1>{myCode}</h1>
 
       {!inCall && !incomingCall && (
         <>
           <input
-            placeholder="Enter code to call"
+            placeholder="Enter code"
             value={targetCode}
             onChange={(e) => setTargetCode(e.target.value)}
           />
+          <br />
           <button onClick={startCall}>Call</button>
         </>
       )}
 
       {incomingCall && (
         <>
-          <p>Incoming Call from {incomingCall.from}</p>
+          <h3>Incoming call from {incomingCall.from}</h3>
           <button onClick={acceptCall}>Accept</button>
           <button onClick={() => setIncomingCall(null)}>Reject</button>
         </>
@@ -144,7 +149,7 @@ export default function App() {
 
       {inCall && <button onClick={endCall}>Hang Up</button>}
 
-      <audio ref={remoteAudioRef} autoPlay />
+      <audio ref={remoteAudioRef} autoPlay playsInline />
     </div>
   );
 }
