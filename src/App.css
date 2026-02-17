@@ -103,6 +103,31 @@ button {
   font-size: 12px;
   outline: none;
 }
+.speaker-box {
+  margin-top: 15px;
+  background: rgba(255, 255, 255, 0.05);
+  padding: 10px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.speaker-box label {
+  display: block;
+  font-size: 10px;
+  color: #888;
+  text-transform: uppercase;
+  margin-bottom: 5px;
+}
+
+.speaker-box select {
+  width: 100%;
+  background: transparent;
+  color: var(--accent);
+  border: none;
+  font-size: 13px;
+  outline: none;
+  cursor: pointer;
+}
 
 @keyframes pulse {
   0% { opacity: 1; }
