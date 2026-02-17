@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import io from "socket.io-client";
+import "./App.css";
 
 const socket = io("https://webrtcbackend-production-0dc3.up.railway.app", {
   transports: ["websocket", "polling"],
@@ -14,9 +15,11 @@ export default function App() {
   const pcRef = useRef(null);
   const remoteAudioRef = useRef();
   const localStreamRef = useRef(null);
+  const pendingCandidatesRef = useRef([]);
+  const peerRef = useRef("");
 
-  useEffect(() => {
-    pcRef.current = new RTCPeerConnection({
+  function createPeerConnection() {
+    const pc = new RTCPeerConnection({
       iceServers: [
         { urls: "stun:stun.l.google.com:19302" },
         {
@@ -30,25 +33,30 @@ export default function App() {
       ],
     });
 
-    socket.on("your-code", setMyCode);
-
-    pcRef.current.ontrack = async (e) => {
+    pc.ontrack = (e) => {
       remoteAudioRef.current.srcObject = e.streams[0];
-      try {
-        await remoteAudioRef.current.play();
-      } catch {}
+      remoteAudioRef.current.play().catch(() => {});
     };
 
-    pcRef.current.onicecandidate = (e) => {
-      if (e.candidate) {
+    pc.onicecandidate = (e) => {
+      if (e.candidate && peerRef.current) {
         socket.emit("ice-candidate", {
-          to: targetCode,
+          to: peerRef.current,
           candidate: e.candidate,
         });
       }
     };
 
+    return pc;
+  }
+
+  useEffect(() => {
+    pcRef.current = createPeerConnection();
+
+    socket.on("your-code", setMyCode);
+
     socket.on("incoming-call", ({ from, offer }) => {
+      peerRef.current = from;
       setIncomingCall({ from, offer });
     });
 
@@ -56,14 +64,38 @@ export default function App() {
       await pcRef.current.setRemoteDescription(
         new RTCSessionDescription(answer),
       );
+
+      for (const candidate of pendingCandidatesRef.current) {
+        await pcRef.current.addIceCandidate(new RTCIceCandidate(candidate));
+      }
+      pendingCandidatesRef.current = [];
+
       setInCall(true);
     });
 
     socket.on("ice-candidate", async (candidate) => {
-      await pcRef.current.addIceCandidate(new RTCIceCandidate(candidate));
+      if (pcRef.current.remoteDescription) {
+        await pcRef.current.addIceCandidate(new RTCIceCandidate(candidate));
+      } else {
+        pendingCandidatesRef.current.push(candidate);
+      }
     });
 
-    socket.on("call-ended", endCall);
+    socket.on("call-ended", cleanupCall);
+
+    socket.on("call-rejected", () => {
+      alert("Call rejected");
+      cleanupCall();
+    });
+
+    return () => {
+      socket.off("your-code");
+      socket.off("incoming-call");
+      socket.off("call-accepted");
+      socket.off("ice-candidate");
+      socket.off("call-ended");
+      socket.off("call-rejected");
+    };
   }, []);
 
   async function initMic() {
@@ -78,6 +110,8 @@ export default function App() {
   }
 
   async function startCall() {
+    peerRef.current = targetCode;
+
     await initMic();
 
     const offer = await pcRef.current.createOffer();
@@ -90,11 +124,18 @@ export default function App() {
   }
 
   async function acceptCall() {
+    peerRef.current = incomingCall.from;
+
     await initMic();
 
     await pcRef.current.setRemoteDescription(
       new RTCSessionDescription(incomingCall.offer),
     );
+
+    for (const candidate of pendingCandidatesRef.current) {
+      await pcRef.current.addIceCandidate(new RTCIceCandidate(candidate));
+    }
+    pendingCandidatesRef.current = [];
 
     const answer = await pcRef.current.createAnswer();
     await pcRef.current.setLocalDescription(answer);
@@ -109,23 +150,47 @@ export default function App() {
     setInCall(true);
   }
 
+  function rejectCall() {
+    socket.emit("call-rejected", { to: incomingCall.from });
+    cleanupCall();
+  }
+
   function endCall() {
-    pcRef.current.close();
+    socket.emit("call-ended", { to: peerRef.current });
+    cleanupCall();
+  }
+
+  function cleanupCall() {
+    if (pcRef.current) {
+      pcRef.current.close();
+    }
+
+    if (remoteAudioRef.current) {
+      remoteAudioRef.current.srcObject = null;
+    }
 
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach((t) => t.stop());
+      localStreamRef.current = null;
     }
+
+    pcRef.current = createPeerConnection();
+    pendingCandidatesRef.current = [];
 
     setInCall(false);
     setIncomingCall(null);
-
-    socket.emit("call-ended", { to: targetCode });
   }
 
   return (
-    <div style={{ textAlign: "center", padding: 30 }}>
+    <div className="app">
       <h2>Your Call Code</h2>
-      <h1>{myCode}</h1>
+
+      <div className="code-box">
+        {myCode}
+        <button onClick={() => navigator.clipboard.writeText(myCode)}>
+          Copy
+        </button>
+      </div>
 
       {!inCall && !incomingCall && (
         <>
@@ -134,16 +199,15 @@ export default function App() {
             value={targetCode}
             onChange={(e) => setTargetCode(e.target.value)}
           />
-          <br />
           <button onClick={startCall}>Call</button>
         </>
       )}
 
       {incomingCall && (
         <>
-          <h3>Incoming call from {incomingCall.from}</h3>
+          <p>Incoming Call from {incomingCall.from}</p>
           <button onClick={acceptCall}>Accept</button>
-          <button onClick={() => setIncomingCall(null)}>Reject</button>
+          <button onClick={rejectCall}>Reject</button>
         </>
       )}
 
