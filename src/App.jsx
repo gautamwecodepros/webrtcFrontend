@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from "react";
 import io from "socket.io-client";
 import "./App.css";
 
-// Initialize socket outside component to prevent multiple connections
 const socket = io("https://webrtcbackend-production-0dc3.up.railway.app", {
   transports: ["websocket", "polling"],
 });
@@ -11,8 +10,6 @@ const ICE_SERVERS = {
   iceServers: [
     { urls: "stun:stun.l.google.com:19302" },
     { urls: "stun:stun1.l.google.com:19302" },
-    // Only use TURN servers if you have valid, paid credentials. 
-    // Broken TURN servers cause connection failures.
   ],
 };
 
@@ -21,9 +18,9 @@ export default function App() {
   const [targetCode, setTargetCode] = useState("");
   const [incomingCall, setIncomingCall] = useState(null);
   const [inCall, setInCall] = useState(false);
-  
-  // Ref to track connection state for debugging
   const [connectionStatus, setConnectionStatus] = useState("Idle");
+  const [audioOutput, setAudioOutput] = useState("default");
+  const [availableOutputs, setAvailableOutputs] = useState([]);
 
   const pcRef = useRef(null);
   const remoteAudioRef = useRef();
@@ -31,8 +28,20 @@ export default function App() {
   const pendingCandidatesRef = useRef([]);
   const targetCodeRef = useRef("");
 
+  // 1. Voice-optimized Constraints
+  // These settings tell the browser: "This is a phone call, not music."
+  const audioConstraints = {
+    audio: {
+      echoCancellation: true, // Crucial for clarity when using loudspeakers
+      noiseSuppression: true, // Removes background hiss
+      autoGainControl: true,  // Levels out volume differences
+      channelCount: 1,        // Mono (cleaner for voice, less bandwidth)
+      latency: 0,             // Lowest possible latency
+    },
+    video: false,
+  };
+
   function createPeerConnection() {
-    // Close existing if any
     if (pcRef.current) pcRef.current.close();
 
     const pc = new RTCPeerConnection(ICE_SERVERS);
@@ -49,15 +58,13 @@ export default function App() {
     pc.ontrack = (e) => {
       if (remoteAudioRef.current) {
         remoteAudioRef.current.srcObject = e.streams[0];
-        // Explicitly attempt to play audio to bypass autoplay policies
-        remoteAudioRef.current.play().catch(e => console.error("Audio play error:", e));
+        // Attempt to play immediately
+        remoteAudioRef.current.play().catch(console.error);
       }
     };
 
     pc.onconnectionstatechange = () => {
-      console.log("Connection State:", pc.connectionState);
       setConnectionStatus(pc.connectionState);
-      
       if (pc.connectionState === "disconnected" || pc.connectionState === "failed") {
         cleanupCall();
       }
@@ -66,30 +73,25 @@ export default function App() {
     return pc;
   }
 
-  // Handle Socket Events
   useEffect(() => {
-    // Initialize PC on mount
     pcRef.current = createPeerConnection();
 
-    // Setup Socket Listeners
-    socket.on("connect", () => console.log("Socket Connected"));
-    socket.on("your-code", (code) => setMyCode(code));
+    // Check for available audio output devices (Speakers/Earpieces)
+    getAudioOutputs();
+
+    socket.on("your-code", setMyCode);
 
     socket.on("incoming-call", ({ from, offer }) => {
-      console.log("Incoming Call from:", from);
       setIncomingCall({ from, offer });
     });
 
     socket.on("call-accepted", async ({ answer }) => {
-      console.log("Call Accepted, setting remote description...");
       try {
         await pcRef.current.setRemoteDescription(new RTCSessionDescription(answer));
-        
-        // Process any queued candidates now that remote description is set
         processPendingCandidates();
         setInCall(true);
       } catch (err) {
-        console.error("Error setting remote description:", err);
+        console.error("Error setting remote desc:", err);
         cleanupCall();
       }
     });
@@ -99,205 +101,188 @@ export default function App() {
         try {
           await pcRef.current.addIceCandidate(new RTCIceCandidate(candidate));
         } catch (e) {
-          console.error("Error adding received candidate:", e);
+          console.error("Error adding candidate:", e);
         }
       } else {
-        // Queue candidates if remote description isn't ready yet
         pendingCandidatesRef.current.push(candidate);
       }
     });
 
     socket.on("call-ended", () => {
-      alert("Call ended by partner");
+      alert("Call ended");
       cleanupCall();
     });
 
     socket.on("call-rejected", () => {
-      alert("Call was rejected");
+      alert("Call rejected");
       cleanupCall();
     });
 
-    // Cleanup on Unmount
     return () => {
-      socket.off("your-code");
-      socket.off("incoming-call");
-      socket.off("call-accepted");
-      socket.off("ice-candidate");
-      socket.off("call-ended");
-      socket.off("call-rejected");
+      socket.off();
       if (pcRef.current) pcRef.current.close();
     };
   }, []);
 
+  // Helper: Get available speakers/earpieces
+  async function getAudioOutputs() {
+    try {
+      // Must ask permission first to see device labels
+      await navigator.mediaDevices.getUserMedia({ audio: true });
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const outputs = devices.filter((d) => d.kind === "audiooutput");
+      setAvailableOutputs(outputs);
+    } catch (e) {
+      console.error("Error enumerating devices:", e);
+    }
+  }
+
+  // Helper: Change Audio Output (Toggle Speaker/Earpiece)
+  async function handleAudioOutputChange(deviceId) {
+    if (remoteAudioRef.current && "setSinkId" in remoteAudioRef.current) {
+      try {
+        await remoteAudioRef.current.setSinkId(deviceId);
+        setAudioOutput(deviceId);
+      } catch (error) {
+        console.error("Error setting audio output:", error);
+      }
+    } else {
+      console.warn("Audio Output selection not supported by this browser.");
+    }
+  }
+
   async function processPendingCandidates() {
-    if (!pcRef.current) return;
     while (pendingCandidatesRef.current.length > 0) {
       const candidate = pendingCandidatesRef.current.shift();
       try {
         await pcRef.current.addIceCandidate(new RTCIceCandidate(candidate));
       } catch (e) {
-        console.error("Error adding pending candidate:", e);
+        console.error(e);
       }
     }
   }
 
   async function initMic() {
-    // If we already have a stream, don't get it again
     if (localStreamRef.current) return;
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // Apply the heavy processing constraints here
+      const stream = await navigator.mediaDevices.getUserMedia(audioConstraints);
       localStreamRef.current = stream;
 
-      // Add tracks to the Peer Connection
       stream.getTracks().forEach((track) => {
-        // Check if track is already added to avoid "sender already exists" error
         const senders = pcRef.current.getSenders();
-        const trackAlreadyAdded = senders.some(sender => sender.track === track);
-        if (!trackAlreadyAdded) {
-            pcRef.current.addTrack(track, stream);
+        if (!senders.find((s) => s.track === track)) {
+          pcRef.current.addTrack(track, stream);
         }
       });
     } catch (err) {
-      console.error("Mic error:", err);
-      alert("Could not access microphone. Please check permissions.");
+      console.error("Mic Error:", err);
+      alert("Microphone access denied or error.");
     }
   }
 
   async function startCall() {
-    if (!targetCode) return alert("Please enter a code");
-    
+    if (!targetCode) return;
     targetCodeRef.current = targetCode;
     setConnectionStatus("Calling...");
-
     await initMic();
 
-    try {
-      const offer = await pcRef.current.createOffer();
-      await pcRef.current.setLocalDescription(offer);
+    const offer = await pcRef.current.createOffer();
+    await pcRef.current.setLocalDescription(offer);
 
-      socket.emit("call-user", {
-        to: targetCode,
-        offer,
-      });
-    } catch (err) {
-      console.error("Error starting call:", err);
-    }
+    socket.emit("call-user", { to: targetCode, offer });
   }
 
   async function acceptCall() {
-    const callerId = incomingCall.from;
-    targetCodeRef.current = callerId;
-    setTargetCode(callerId);
+    targetCodeRef.current = incomingCall.from;
+    setTargetCode(incomingCall.from);
     setConnectionStatus("Connecting...");
-
     await initMic();
 
-    try {
-      await pcRef.current.setRemoteDescription(new RTCSessionDescription(incomingCall.offer));
-      
-      // Process candidates that arrived before we clicked accept
-      processPendingCandidates();
+    await pcRef.current.setRemoteDescription(
+      new RTCSessionDescription(incomingCall.offer)
+    );
+    processPendingCandidates();
 
-      const answer = await pcRef.current.createAnswer();
-      await pcRef.current.setLocalDescription(answer);
+    const answer = await pcRef.current.createAnswer();
+    await pcRef.current.setLocalDescription(answer);
 
-      socket.emit("answer-call", {
-        to: callerId,
-        answer,
-      });
-
-      setIncomingCall(null);
-      setInCall(true);
-    } catch (err) {
-      console.error("Error accepting call:", err);
-      cleanupCall();
-    }
-  }
-
-  function rejectCall() {
-    socket.emit("call-rejected", { to: incomingCall.from });
+    socket.emit("answer-call", { to: targetCodeRef.current, answer });
     setIncomingCall(null);
-  }
-
-  function endCall() {
-    socket.emit("call-ended", { to: targetCodeRef.current });
-    cleanupCall();
+    setInCall(true);
   }
 
   function cleanupCall() {
     if (localStreamRef.current) {
-      localStreamRef.current.getTracks().forEach((track) => track.stop());
+      localStreamRef.current.getTracks().forEach((t) => t.stop());
       localStreamRef.current = null;
     }
-
-    if (remoteAudioRef.current) {
-      remoteAudioRef.current.srcObject = null;
-    }
-
-    if (pcRef.current) {
-      pcRef.current.ontrack = null;
-      pcRef.current.onicecandidate = null;
-      pcRef.current.onconnectionstatechange = null;
-      pcRef.current.close();
-    }
-
-    // Create a fresh PC for the next call
+    if (pcRef.current) pcRef.current.close();
     pcRef.current = createPeerConnection();
     pendingCandidatesRef.current = [];
-    
     setInCall(false);
     setIncomingCall(null);
-    setTargetCode("");
     setConnectionStatus("Idle");
   }
 
   return (
     <div className="app">
-      <h2>WebRTC Audio Call</h2>
-      <div className="status-badge">Status: {connectionStatus}</div>
+      <h2>Voice Call</h2>
+      <div className="status">Status: {connectionStatus}</div>
 
       <div className="code-box">
-        <p>Your Code:</p>
-        <div className="code-display">
-            {myCode || "Connecting to server..."}
+        <p>My Code: <b>{myCode}</b></p>
+        <button onClick={() => navigator.clipboard.writeText(myCode)}>Copy</button>
+      </div>
+
+      {!inCall && !incomingCall && (
+        <div className="dialer">
+          <input
+            value={targetCode}
+            onChange={(e) => setTargetCode(e.target.value)}
+            placeholder="Enter friend's code"
+          />
+          <button onClick={startCall}>Call</button>
         </div>
-        <button onClick={() => navigator.clipboard.writeText(myCode)}>
-          Copy Code
-        </button>
-      </div>
+      )}
 
-      <div className="controls">
-        {!inCall && !incomingCall && (
-          <div className="dialer">
-            <input
-              placeholder="Enter friend's code"
-              value={targetCode}
-              onChange={(e) => setTargetCode(e.target.value)}
-            />
-            <button className="btn-call" onClick={startCall}>Call</button>
-          </div>
-        )}
+      {incomingCall && (
+        <div className="incoming">
+          <p>Call from {incomingCall.from}</p>
+          <button onClick={acceptCall}>Accept</button>
+          <button onClick={() => socket.emit("call-rejected", { to: incomingCall.from })}>
+            Reject
+          </button>
+        </div>
+      )}
 
-        {incomingCall && (
-          <div className="incoming-alert">
-            <p>Incoming Call from {incomingCall.from.slice(0, 5)}...</p>
-            <div className="action-buttons">
-                <button className="btn-accept" onClick={acceptCall}>Accept</button>
-                <button className="btn-reject" onClick={rejectCall}>Reject</button>
+      {inCall && (
+        <div className="active-call">
+          <button onClick={() => socket.emit("call-ended", { to: targetCodeRef.current })}>
+            Hang Up
+          </button>
+          
+          {/* Audio Output Switcher (Visible only if browser supports it) */}
+          {availableOutputs.length > 0 && (
+            <div className="audio-switcher">
+              <label>Output: </label>
+              <select 
+                onChange={(e) => handleAudioOutputChange(e.target.value)}
+                value={audioOutput}
+              >
+                {availableOutputs.map((device) => (
+                  <option key={device.deviceId} value={device.deviceId}>
+                    {device.label || `Speaker ${device.deviceId.slice(0, 5)}...`}
+                  </option>
+                ))}
+              </select>
             </div>
-          </div>
-        )}
+          )}
+        </div>
+      )}
 
-        {inCall && (
-            <div className="active-call">
-                <p>In Call with {targetCodeRef.current.slice(0, 5)}...</p>
-                <button className="btn-end" onClick={endCall}>Hang Up</button>
-            </div>
-        )}
-      </div>
-
-      {/* PlaysInline ensures audio works on mobile browsers */}
+      {/* Audio Element */}
       <audio ref={remoteAudioRef} autoPlay playsInline controls={false} />
     </div>
   );
