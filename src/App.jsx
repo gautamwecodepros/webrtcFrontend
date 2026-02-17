@@ -19,24 +19,18 @@ export default function App() {
   const [incomingCall, setIncomingCall] = useState(null);
   const [inCall, setInCall] = useState(false);
   const [status, setStatus] = useState("Idle");
-  const [outputs, setOutputs] = useState([]);
   const [isMuted, setIsMuted] = useState(false);
+  
+  // Speaker Selection States
+  const [outputs, setOutputs] = useState([]);
+  const [selectedOutput, setSelectedOutput] = useState("");
+  const [canSwitchSpeaker, setCanSwitchSpeaker] = useState(false);
 
   const pcRef = useRef(null);
   const remoteAudioRef = useRef();
   const localStreamRef = useRef(null);
   const pendingCandidatesRef = useRef([]);
   const targetCodeRef = useRef("");
-
-  // Professional Voice Constraints
-  const mediaConstraints = {
-    audio: {
-      echoCancellation: true,
-      noiseSuppression: true,
-      autoGainControl: true,
-      sampleRate: 48000,
-    }
-  };
 
   function createPeerConnection() {
     if (pcRef.current) pcRef.current.close();
@@ -67,42 +61,75 @@ export default function App() {
 
   useEffect(() => {
     pcRef.current = createPeerConnection();
+    
+    // Check if browser even supports speaker switching
+    if (HTMLAudioElement.prototype.setSinkId) {
+      setCanSwitchSpeaker(true);
+    }
+
     socket.on("your-code", setMyCode);
     socket.on("incoming-call", ({ from, offer }) => setIncomingCall({ from, offer }));
     socket.on("call-rejected", () => { alert("Call Rejected"); cleanupCall(); });
     socket.on("call-ended", cleanupCall);
-
-    socket.on("call-accepted", async ({ answer }) => {
-      try {
-        await pcRef.current.setRemoteDescription(new RTCSessionDescription(answer));
-        while (pendingCandidatesRef.current.length > 0) {
-          await pcRef.current.addIceCandidate(pendingCandidatesRef.current.shift());
-        }
-        setInCall(true);
-      } catch (e) { console.error(e); }
-    });
-
-    socket.on("ice-candidate", async (candidate) => {
-      if (pcRef.current?.remoteDescription) {
-        await pcRef.current.addIceCandidate(new RTCIceCandidate(candidate)).catch(console.error);
-      } else {
-        pendingCandidatesRef.current.push(candidate);
-      }
-    });
+    socket.on("call-accepted", handleCallAccepted);
+    socket.on("ice-candidate", handleIceCandidate);
 
     return () => { socket.off(); pcRef.current?.close(); };
   }, []);
 
+  async function handleCallAccepted({ answer }) {
+    try {
+      await pcRef.current.setRemoteDescription(new RTCSessionDescription(answer));
+      while (pendingCandidatesRef.current.length > 0) {
+        await pcRef.current.addIceCandidate(pendingCandidatesRef.current.shift());
+      }
+      setInCall(true);
+    } catch (e) { console.error(e); }
+  }
+
+  async function handleIceCandidate(candidate) {
+    if (pcRef.current?.remoteDescription) {
+      await pcRef.current.addIceCandidate(new RTCIceCandidate(candidate)).catch(console.error);
+    } else {
+      pendingCandidatesRef.current.push(candidate);
+    }
+  }
+
+  // REFRESH SPEAKERS: Crucial to call this after Mic permission is granted
+  async function refreshDevices() {
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const audioOutputs = devices.filter(d => d.kind === "audiooutput" && d.deviceId !== "default");
+      setOutputs(audioOutputs);
+    } catch (err) {
+      console.error("Error listing speakers:", err);
+    }
+  }
+
   async function initMedia() {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia(mediaConstraints);
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+      });
       localStreamRef.current = stream;
       stream.getTracks().forEach(track => pcRef.current.addTrack(track, stream));
       
-      const devices = await navigator.mediaDevices.enumerateDevices();
-      setOutputs(devices.filter(d => d.kind === "audiooutput"));
+      // Permission is now granted, we can see device names!
+      await refreshDevices();
     } catch (err) {
-      alert("Microphone access is required for calls.");
+      alert("Microphone access is required.");
+    }
+  }
+
+  async function switchSpeaker(deviceId) {
+    if (remoteAudioRef.current && remoteAudioRef.current.setSinkId) {
+      try {
+        await remoteAudioRef.current.setSinkId(deviceId);
+        setSelectedOutput(deviceId);
+        console.log(`Audio routed to: ${deviceId}`);
+      } catch (err) {
+        console.error("Failed to switch speaker:", err);
+      }
     }
   }
 
@@ -140,25 +167,6 @@ export default function App() {
     setStatus("Idle");
   }
 
-  function endCall() {
-    socket.emit("call-ended", { to: targetCodeRef.current });
-    cleanupCall();
-  }
-
-  const toggleMute = () => {
-    if (localStreamRef.current) {
-      const enabled = localStreamRef.current.getAudioTracks()[0].enabled;
-      localStreamRef.current.getAudioTracks()[0].enabled = !enabled;
-      setIsMuted(enabled);
-    }
-  };
-
-  async function switchSpeaker(id) {
-    if (remoteAudioRef.current.setSinkId) {
-      await remoteAudioRef.current.setSinkId(id);
-    }
-  }
-
   return (
     <div className="app-container">
       <div className="glass-card">
@@ -179,7 +187,7 @@ export default function App() {
 
           {incomingCall && (
             <div className="call-alert">
-              <p>Incoming from <b>{incomingCall.from.slice(0, 6)}</b></p>
+              <p>Incoming Call...</p>
               <div className="btn-group">
                 <button className="btn-success" onClick={acceptCall}>Accept</button>
                 <button className="btn-danger" onClick={() => { socket.emit("call-rejected", { to: incomingCall.from }); setIncomingCall(null); }}>Reject</button>
@@ -189,16 +197,35 @@ export default function App() {
 
           {inCall && (
             <div className="active-ui">
-              <div className="timer">In Conversation</div>
-              <div className="controls">
-                <button className={`btn-icon ${isMuted ? 'active' : ''}`} onClick={toggleMute}>{isMuted ? "🔇" : "🎤"}</button>
-                <button className="btn-hangup" onClick={endCall}>✕</button>
-              </div>
-              {outputs.length > 0 && (
-                <select className="speaker-select" onChange={e => switchSpeaker(e.target.value)}>
-                  {outputs.map(d => <option key={d.deviceId} value={d.deviceId}>{d.label || "Speaker"}</option>)}
-                </select>
+              <div className="timer">Connected</div>
+              
+              {/* Speaker Selector - only shows if browser supports it */}
+              {canSwitchSpeaker && outputs.length > 0 && (
+                <div className="speaker-box">
+                  <label>Speaker Output</label>
+                  <select value={selectedOutput} onChange={e => switchSpeaker(e.target.value)}>
+                    <option value="default">Default Speaker</option>
+                    {outputs.map(d => (
+                      <option key={d.deviceId} value={d.deviceId}>
+                        {d.label || `Speaker ${d.deviceId.slice(0, 5)}`}
+                      </option>
+                    ))}
+                  </select>
+                </div>
               )}
+
+              <div className="controls">
+                <button className={`btn-icon ${isMuted ? 'active' : ''}`} onClick={() => {
+                  const track = localStreamRef.current.getAudioTracks()[0];
+                  track.enabled = !track.enabled;
+                  setIsMuted(!track.enabled);
+                }}>{isMuted ? "🔇" : "🎤"}</button>
+                
+                <button className="btn-hangup" onClick={() => {
+                   socket.emit("call-ended", { to: targetCodeRef.current });
+                   cleanupCall();
+                }}>✕</button>
+              </div>
             </div>
           )}
         </main>
