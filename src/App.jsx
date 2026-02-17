@@ -185,7 +185,7 @@ export default function App() {
     <div className="app">
       <h2>Your Call Code</h2>
 
-      <div className="code-box">
+      <div className="code-box aman">
         {myCode}
         <button onClick={() => navigator.clipboard.writeText(myCode)}>
           Copy
